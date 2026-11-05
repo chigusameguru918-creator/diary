@@ -605,15 +605,22 @@ kbd{font-family:var(--sans);font-size:11px;border:1px solid var(--line);border-b
     }
     let obj;
     try { obj = JSON.parse(td.decode(b64ToBytes(b64))); } catch(e){ throw new SyncError('format'); }
-    let encrypted = false, salt = null;
+    let encrypted = false, salt = null, rekey = false;
     if (obj && obj.format === 'diary-encrypted'){
       encrypted = true; salt = obj.salt;
-      const text = await decryptObj(obj, cfg.pass);
+      let text;
+      try { text = await decryptObj(obj, cfg.pass); }
+      catch(e){
+        // パスワードを変えた直後：前のパスワードで開いて、新しいパスワードで暗号化し直す
+        if (e.code !== 'badpass' || !cfg.oldPass) throw e;
+        text = await decryptObj(obj, cfg.oldPass);
+        rekey = true;
+      }
       try { obj = JSON.parse(text); } catch(e){ throw new SyncError('format'); }
     }
     const arr = Array.isArray(obj) ? obj : obj && obj.entries;
     if (!Array.isArray(arr)) throw new SyncError('format');
-    return { sha:j.sha, entries:arr, encrypted, salt };
+    return { sha:j.sha, entries:arr, encrypted, salt, rekey };
   }
 
   /* 新しいほう（updatedAt が大きいほう）を残して合わせる */
@@ -663,10 +670,10 @@ kbd{font-family:var(--sans);font-size:11px;border:1px solid var(--line);border-b
         const remoteById = new Map(remote.entries.map(sanitize).filter(Boolean).map(e => [e.id, e]));
         const upload = entries.map(e => (e.deleted || !isEmpty(e)) ? e : remoteById.get(e.id)).filter(Boolean);
         const canon = canonical(upload);
-        if (remote.sha && remote.encrypted && canon === canonical(remote.entries)){ done = true; break; }
+        if (remote.sha && remote.encrypted && !remote.rekey && canon === canonical(remote.entries)){ done = true; break; }
 
         const plain = JSON.stringify({ app:'diary', version:1, entries: JSON.parse(canon) });
-        const payload = await encryptText(plain, cfg.pass, remote.encrypted ? remote.salt : null);
+        const payload = await encryptText(plain, cfg.pass, (remote.encrypted && !remote.rekey) ? remote.salt : null);
         const put = await gh(`/contents/${FILE}`, { method:'PUT', headers:{ 'Content-Type':'application/json' },
           body: JSON.stringify({ message:`diary sync ${new Date().toISOString()}`,
             content: bytesToB64(te.encode(payload)), ...(remote.sha ? { sha: remote.sha } : {}) }) });
@@ -676,6 +683,7 @@ kbd{font-family:var(--sans);font-size:11px;border:1px solid var(--line);border-b
         done = true;
       }
       if (!done) throw new SyncError('conflict');
+      if (cfg.oldPass){ delete cfg.oldPass; lsSet(CFG_KEY, JSON.stringify(cfg)); }
       lsSet(LAST_SYNC_KEY, String(Date.now()));
       lastError = null;
       setSyncState('ok');
@@ -764,6 +772,9 @@ kbd{font-family:var(--sans);font-size:11px;border:1px solid var(--line);border-b
       m.className = 'syncmsg err'; m.textContent = 'ユーザー名とリポジトリ名は半角英数字で入れてください。'; return;
     }
     $('cfgToken').value = next.token;
+    // 暗号化パスワードを変えた場合は、前のものを一時的に覚えておく（保管庫を開き直すため）
+    if (cfg && cfg.pass && cfg.pass !== next.pass) next.oldPass = cfg.oldPass || cfg.pass;
+    else if (cfg && cfg.oldPass && cfg.oldPass !== next.pass) next.oldPass = cfg.oldPass;
     cfg = next; lsSet(CFG_KEY, JSON.stringify(cfg)); lastError = null;
     const ok = await sync();
     if (ok) toast('同期しました');
