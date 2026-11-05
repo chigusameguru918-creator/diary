@@ -546,7 +546,8 @@ kbd{font-family:var(--sans);font-size:11px;border:1px solid var(--line);border-b
     badpass:  '暗号化パスワードが違います。他の端末と同じパスワードを入れてください。',
     nocrypto: 'このページは暗号化を使えない状態で開かれています（https のアドレスで開いてください）。',
     conflict: '他の端末と同時に保存がぶつかりました。もう一度同期してください。',
-    network:  'GitHub に接続できませんでした。',
+    network:  'GitHub に接続できませんでした。ネット接続のほか、広告ブロックなどのブラウザ拡張機能が通信を止めていないか確認してください。',
+    badtoken: 'アクセストークン欄に、トークン以外の文字（日本語・全角文字・改行など）が入っています。欄を空にしてから、github_pat_ で始まる文字列だけを貼り付けてください。',
     http:     'GitHub との通信でエラーが起きました。',
     format:   '保管されているファイルの形式が読み取れません。'
   };
@@ -562,7 +563,12 @@ kbd{font-family:var(--sans);font-size:11px;border:1px solid var(--line);border-b
       res = await fetch(url, { ...opts, cache:'no-store', headers: {
         'Accept':'application/vnd.github+json', 'Authorization':'Bearer ' + cfg.token,
         'X-GitHub-Api-Version':'2022-11-28', ...(opts.headers || {}) } });
-    } catch(e){ throw new SyncError('network'); }
+    } catch(e){
+      const msg = String(e && e.message || e);
+      // 送信前にブラウザが止めた（ヘッダーに使えない文字が入っている）場合
+      if (/ISO-8859-1|header|Headers|code point|Invalid/i.test(msg)) throw new SyncError('badtoken', msg);
+      throw new SyncError('network', msg);
+    }
     if (res.status === 401) throw new SyncError('auth');
     if (res.status === 403 || res.status === 429){
       if (res.headers.get('x-ratelimit-remaining') === '0' || res.status === 429) throw new SyncError('ratelimit');
@@ -686,7 +692,15 @@ kbd{font-family:var(--sans);font-size:11px;border:1px solid var(--line);border-b
     }
   }
 
-  function errText(err){ return (ERR[err.code] || ERR.http) + (err.code === 'http' && err.detail ? `（${err.detail}）` : ''); }
+  function errText(err){
+    return (ERR[err.code] || ERR.http) + (['http','network','badtoken'].includes(err.code) && err.detail ? `（詳細：${err.detail}）` : '');
+  }
+  /* 貼り付けたトークンから空白・改行・見えない文字を取り除く */
+  const cleanToken = s => String(s).replace(/[\s​-‍⁠﻿]/g, '');
+  const tokenProblem = t =>
+    /[^\x21-\x7E]/.test(t) ? 'アクセストークン欄に、トークン以外の文字（日本語や全角文字など）が入っています。欄を空にしてから、github_pat_ で始まる文字列だけを貼り付けてください。'
+    : !/^(github_pat_|ghp_)[A-Za-z0-9_]{20,}$/.test(t) ? 'アクセストークンは github_pat_ で始まる長い英数字の文字列です。最後まで欠けずにコピーできているか確認してください。'
+    : '';
   function setSyncState(state, err){
     const dot = $('syncDot'), txt = $('syncText');
     dot.className = 'dot';
@@ -739,11 +753,17 @@ kbd{font-family:var(--sans);font-size:11px;border:1px solid var(--line);border-b
   }
   $('cfgSave').addEventListener('click', async () => {
     const next = { owner: $('cfgOwner').value.trim(), repo: $('cfgRepo').value.trim(),
-                   token: $('cfgToken').value.trim(), pass: $('cfgPass').value };
+                   token: cleanToken($('cfgToken').value), pass: $('cfgPass').value };
     const m = $('cfgMsg');
     if (!next.owner || !next.repo || !next.token || !next.pass){
       m.className = 'syncmsg err'; m.textContent = 'すべての欄を入れてください。'; return;
     }
+    const tp = tokenProblem(next.token);
+    if (tp){ m.className = 'syncmsg err'; m.textContent = tp; return; }
+    if (/[^\x21-\x7E]/.test(next.owner + next.repo)){
+      m.className = 'syncmsg err'; m.textContent = 'ユーザー名とリポジトリ名は半角英数字で入れてください。'; return;
+    }
+    $('cfgToken').value = next.token;
     cfg = next; lsSet(CFG_KEY, JSON.stringify(cfg)); lastError = null;
     const ok = await sync();
     if (ok) toast('同期しました');
